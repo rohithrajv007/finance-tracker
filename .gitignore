@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.pyc
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Database and user data
+data/finance.db
+data/vectors/
+data/chroma_db/
+data/settings.json
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+build_log.txt
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+test_*.py
+run_debug.py
+make_icon.py
+reembed.py
+
+# Huggingface cache
+.cache/
