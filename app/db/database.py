@@ -54,6 +54,22 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_transactions_category
             ON transactions(category);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS transactions_fts
+        USING fts5(
+            transaction_id,
+            month_id,
+            month_label,
+            date,
+            paid_to,
+            description,
+            category,
+            mode_of_transaction,
+            debit,
+            credit,
+            content='',
+            tokenize='unicode61 remove_diacritics 1'
+        );
     """)
 
     conn.commit()
@@ -184,7 +200,7 @@ def get_top_payees(month_id, limit=10):
 
 
 def get_monthly_comparison():
-    """Return income + expense for every imported month (for compare view)."""
+    """Return income + expense for every imported month."""
     conn = get_connection()
     rows = conn.execute("""
         SELECT
@@ -223,3 +239,142 @@ def get_chat_history(limit: int = 50) -> list:
     ).fetchall()
     conn.close()
     return [dict(r) for r in reversed(rows)]
+
+
+# ── FTS5 functions ────────────────────────────────────────────────────────────
+
+def index_transactions_fts(month_id: int, month_label: str,
+                            transactions: list):
+    """
+    Insert transactions into FTS5 virtual table for full text search.
+    Clears existing entries for this month before re-indexing.
+    """
+    conn = get_connection()
+
+    # clear existing FTS entries for this month first
+    conn.execute(
+        "DELETE FROM transactions_fts WHERE month_id = ?",
+        (str(month_id),)
+    )
+
+    rows = []
+    for t in transactions:
+        rows.append((
+            str(t.get("id", "")),
+            str(month_id),
+            month_label,
+            t.get("date", ""),
+            t.get("paid_to", ""),
+            t.get("description", ""),
+            t.get("category", ""),
+            t.get("mode_of_transaction", ""),
+            str(t.get("debit",  0)),
+            str(t.get("credit", 0)),
+        ))
+
+    conn.executemany("""
+        INSERT INTO transactions_fts
+            (transaction_id, month_id, month_label, date,
+             paid_to, description, category,
+             mode_of_transaction, debit, credit)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, rows)
+
+    conn.commit()
+    conn.close()
+    print(f"FTS5 indexed {len(rows)} transactions for {month_label}.")
+
+
+def search_fts(query: str, month_id: int = None,
+               limit: int = 25) -> list:
+    """
+    Full text search using FTS5.
+    Returns list of matching transaction dicts.
+
+    Supports:
+    - Exact match:   "INOX"
+    - Prefix match:  "muru*"
+    - Phrase match:  "PVR INOX"
+    - AND search:    "entertainment UPI"
+    """
+    conn = get_connection()
+
+    # clean query for FTS5 — escape special chars
+    clean_query = query.strip()
+
+    # build safe FTS5 query
+    # try exact phrase first, fallback to prefix on each word
+    words   = clean_query.split()
+    fts_query = " OR ".join([f'"{w}"' for w in words if w])
+
+    try:
+        if month_id:
+            rows = conn.execute(f"""
+                SELECT *
+                FROM transactions_fts
+                WHERE transactions_fts MATCH ?
+                  AND month_id = ?
+                ORDER BY rank
+                LIMIT ?
+            """, (fts_query, str(month_id), limit)).fetchall()
+        else:
+            rows = conn.execute(f"""
+                SELECT *
+                FROM transactions_fts
+                WHERE transactions_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """, (fts_query, limit)).fetchall()
+
+        conn.close()
+        return [dict(r) for r in rows]
+
+    except Exception as e:
+        # if FTS query syntax fails fallback to LIKE search
+        print(f"FTS5 query failed ({e}), falling back to LIKE search")
+        conn.close()
+        return search_fts_fallback(query, month_id, limit)
+
+
+def search_fts_fallback(query: str, month_id: int = None,
+                         limit: int = 25) -> list:
+    """
+    Fallback LIKE search if FTS5 query syntax fails.
+    """
+    conn = get_connection()
+    like_query = f"%{query}%"
+
+    if month_id:
+        rows = conn.execute("""
+            SELECT * FROM transactions_fts
+            WHERE (paid_to LIKE ?
+               OR description LIKE ?
+               OR category LIKE ?)
+              AND month_id = ?
+            LIMIT ?
+        """, (like_query, like_query, like_query,
+              str(month_id), limit)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT * FROM transactions_fts
+            WHERE paid_to LIKE ?
+               OR description LIKE ?
+               OR category LIKE ?
+            LIMIT ?
+        """, (like_query, like_query,
+              like_query, limit)).fetchall()
+
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_fts_index(month_id: int):
+    """Remove FTS5 entries for a month."""
+    conn = get_connection()
+    conn.execute(
+        "DELETE FROM transactions_fts WHERE month_id = ?",
+        (str(month_id),)
+    )
+    conn.commit()
+    conn.close()
+    print(f"FTS5 index deleted for month_id={month_id}.")

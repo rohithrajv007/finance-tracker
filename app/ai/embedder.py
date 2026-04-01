@@ -55,12 +55,14 @@ def transaction_to_text(t: dict) -> str:
     if debit > 0:
         return (
             f"On {date} ({month_label}), paid ₹{debit:,.2f} to {paid_to} "
-            f"via {mode}. Category: {category}. Balance after: ₹{balance:,.2f}."
+            f"via {mode}. Category: {category}. "
+            f"Balance after: ₹{balance:,.2f}."
         )
     else:
         return (
-            f"On {date} ({month_label}), received ₹{credit:,.2f} from {paid_to} "
-            f"via {mode}. Category: {category}. Balance after: ₹{balance:,.2f}."
+            f"On {date} ({month_label}), received ₹{credit:,.2f} "
+            f"from {paid_to} via {mode}. Category: {category}. "
+            f"Balance after: ₹{balance:,.2f}."
         )
 
 
@@ -72,10 +74,9 @@ def embed_month(month_id: int, month_label: str, transactions: list):
 
     model = _get_model()
 
-    # load existing store
     existing_vectors, existing_meta = _load_store()
 
-    # remove old entries for this month (clean re-import)
+    # remove old entries for this month
     if existing_meta:
         keep_idx = [
             i for i, m in enumerate(existing_meta)
@@ -88,7 +89,6 @@ def embed_month(month_id: int, month_label: str, transactions: list):
             existing_vectors = None
             existing_meta    = []
 
-    # build new entries
     documents = []
     new_meta  = []
 
@@ -109,7 +109,6 @@ def embed_month(month_id: int, month_label: str, transactions: list):
 
     new_vectors = model.encode(documents, show_progress_bar=False)
 
-    # merge with existing
     if existing_vectors is not None and len(existing_vectors) > 0:
         all_vectors = np.vstack([existing_vectors, new_vectors])
         all_meta    = existing_meta + new_meta
@@ -123,10 +122,6 @@ def embed_month(month_id: int, month_label: str, transactions: list):
 
 # ── cosine similarity search ──────────────────────────────────────────────────
 def search(query: str, month_id: int = None, top_k: int = 25) -> list:
-    """
-    Search for relevant transactions using cosine similarity.
-    Returns list of natural language transaction sentences.
-    """
     vectors, metadata = _load_store()
 
     if vectors is None or len(metadata) == 0:
@@ -135,7 +130,6 @@ def search(query: str, month_id: int = None, top_k: int = 25) -> list:
     model     = _get_model()
     query_vec = model.encode([query])[0]
 
-    # filter by month if specified
     if month_id is not None:
         indices = [
             i for i, m in enumerate(metadata)
@@ -149,7 +143,6 @@ def search(query: str, month_id: int = None, top_k: int = 25) -> list:
         filtered_vectors = vectors
         filtered_meta    = metadata
 
-    # cosine similarity
     norms          = np.linalg.norm(filtered_vectors, axis=1, keepdims=True)
     norms          = np.where(norms == 0, 1, norms)
     normed_vectors = filtered_vectors / norms
@@ -165,7 +158,90 @@ def search(query: str, month_id: int = None, top_k: int = 25) -> list:
     return [filtered_meta[i]["text"] for i in top_indices]
 
 
-# ── delete month embeddings ───────────────────────────────────────────────────
+# ── hybrid search ─────────────────────────────────────────────────────────────
+def hybrid_search(query: str, month_id: int = None, top_k: int = 25) -> list:
+    fts_texts = []
+
+    try:
+        from app.db.database import search_fts
+        fts_results = search_fts(query, month_id=month_id, limit=top_k)
+
+        for r in fts_results:
+            try:
+                debit  = float(r.get("debit", 0) or 0)
+            except (TypeError, ValueError):
+                debit = 0.0
+
+            try:
+                credit = float(r.get("credit", 0) or 0)
+            except (TypeError, ValueError):
+                credit = 0.0
+
+            date        = r.get("date", "") or ""
+            paid_to     = r.get("paid_to", "") or ""
+            category    = r.get("category", "") or ""
+            mode        = r.get("mode_of_transaction", "") or ""
+            month_label = r.get("month_label", "") or ""
+
+            if not date or not paid_to:
+                continue
+
+            if debit > 0:
+                text = (
+                    f"On {date} ({month_label}), paid ₹{debit:,.2f} "
+                    f"to {paid_to} via {mode}. Category: {category}."
+                )
+            else:
+                text = (
+                    f"On {date} ({month_label}), received ₹{credit:,.2f} "
+                    f"from {paid_to} via {mode}. Category: {category}."
+                )
+
+            fts_texts.append(text)
+
+    except Exception as e:
+        print(f"FTS5 search warning: {e}")
+        fts_texts = []
+
+    # semantic search
+    try:
+        semantic_texts = search(query, month_id=month_id, top_k=top_k)
+    except Exception as e:
+        print(f"Semantic search warning: {e}")
+        semantic_texts = []
+
+    # merge + deduplicate
+    seen = set()
+    combined = []
+
+    for text in fts_texts + semantic_texts:
+        key = text[:60].strip().lower()
+        if key not in seen:
+            seen.add(key)
+            combined.append(text)
+
+    return combined[:top_k]
+
+
+# ── delete embeddings ─────────────────────────────────────────────────────────
 def delete_month_embeddings(month_id: int):
-    """Remove all embeddings for a month."""
     vectors, metadata = _load_store()
+    if not metadata:
+        return
+
+    keep_idx = [
+        i for i, m in enumerate(metadata)
+        if m.get("month_id") != month_id
+    ]
+
+    if keep_idx:
+        new_vectors = vectors[keep_idx]
+        new_meta    = [metadata[i] for i in keep_idx]
+        _save_store(new_vectors, new_meta)
+    else:
+        if VECTORS_FILE.exists():
+            VECTORS_FILE.unlink()
+        if METADATA_FILE.exists():
+            METADATA_FILE.unlink()
+
+    print(f"Deleted embeddings for month_id={month_id}.")

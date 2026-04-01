@@ -5,11 +5,13 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QListWidget,
     QListWidgetItem
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont
 
 import app.settings as settings
-from app.db.database import get_all_months, get_connection
+from app.db.database import (
+    get_all_months, get_connection, delete_fts_index
+)
 from app.ai.embedder import delete_month_embeddings
 
 BG     = "#F7F6F2"
@@ -33,7 +35,6 @@ def _shadow(widget, blur=14, offset=2, opacity=0.07):
 
 
 def section_card(title: str) -> tuple:
-    """Returns (card_frame, content_layout)"""
     card = QFrame()
     card.setStyleSheet(f"""
         QFrame {{
@@ -66,7 +67,6 @@ def section_card(title: str) -> tuple:
 
 def input_row(label: str, placeholder: str,
               value: str = "", password: bool = False) -> tuple:
-    """Returns (row_widget, QLineEdit)"""
     row = QWidget()
     row.setStyleSheet("background: transparent; border: none;")
     layout = QHBoxLayout(row)
@@ -108,7 +108,6 @@ def input_row(label: str, placeholder: str,
 
 
 class SettingsTab(QWidget):
-    # emitted when settings that affect other tabs change
     settings_changed = pyqtSignal(dict)
     month_deleted    = pyqtSignal()
 
@@ -121,9 +120,9 @@ class SettingsTab(QWidget):
     def _build_ui(self):
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(f"""
-            QScrollArea {{ border: none; background: {BG}; }}
-        """)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: none; background: {BG}; }}"
+        )
 
         container = QWidget()
         container.setStyleSheet(f"background: {BG};")
@@ -163,7 +162,6 @@ class SettingsTab(QWidget):
             settings.get("model_name")
         )
 
-        # test connection button
         test_row = QWidget()
         test_row.setStyleSheet("background: transparent; border: none;")
         test_layout = QHBoxLayout(test_row)
@@ -243,9 +241,7 @@ class SettingsTab(QWidget):
             }}
         """)
 
-        theme_note = QLabel(
-            "Dark theme restarts the app to apply fully."
-        )
+        theme_note = QLabel("Dark theme restarts the app to apply fully.")
         theme_note.setStyleSheet(
             f"color: {MUTED}; font-size: 11px; "
             "background: transparent; border: none;"
@@ -343,7 +339,8 @@ class SettingsTab(QWidget):
             "Finance Tracker v1.0\n"
             "A fully local, private personal finance app.\n"
             "No internet required. All data stays on your device.\n\n"
-            "Built with PyQt6 · SQLite · sentence-transformers · LM Studio"
+            "Built with PyQt6 · SQLite FTS5 · "
+            "sentence-transformers · LM Studio"
         )
         about_text.setStyleSheet(
             f"color: {MUTED}; font-size: 12px; line-height: 1.6; "
@@ -398,10 +395,16 @@ class SettingsTab(QWidget):
     # ── private ───────────────────────────────────────────────────
     def _load_settings(self):
         s = settings.load()
-        self.url_edit.setText(s.get("lm_studio_url", "http://localhost:1234"))
-        self.model_edit.setText(s.get("model_name", "phi-3-mini-4k-instruct"))
+        self.url_edit.setText(
+            s.get("lm_studio_url", "http://localhost:1234")
+        )
+        self.model_edit.setText(
+            s.get("model_name", "phi-3-mini-4k-instruct")
+        )
         theme = s.get("theme", "light")
-        self.theme_combo.setCurrentText("Dark" if theme == "dark" else "Light")
+        self.theme_combo.setCurrentText(
+            "Dark" if theme == "dark" else "Light"
+        )
         self.refresh_months()
 
     def _save_settings(self):
@@ -416,9 +419,7 @@ class SettingsTab(QWidget):
             f"color: {GREEN}; font-size: 12px; "
             "background: transparent; border: none;"
         )
-        QTimer_clear = lambda: self.save_status.setText("")
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(3000, QTimer_clear)
+        QTimer.singleShot(3000, lambda: self.save_status.setText(""))
         self.settings_changed.emit(s)
 
     def _test_connection(self):
@@ -430,7 +431,7 @@ class SettingsTab(QWidget):
             "background: transparent; border: none;"
         )
         try:
-            resp = requests.get(f"{url}/v1/models", timeout=5)
+            resp   = requests.get(f"{url}/v1/models", timeout=5)
             models = resp.json().get("data", [])
             names  = [m["id"] for m in models]
             self.connection_status.setText(
@@ -441,7 +442,9 @@ class SettingsTab(QWidget):
                 "background: transparent; border: none;"
             )
         except Exception as e:
-            self.connection_status.setText(f"✗  Failed: {str(e)[:60]}")
+            self.connection_status.setText(
+                f"✗  Failed: {str(e)[:60]}"
+            )
             self.connection_status.setStyleSheet(
                 f"color: {RED}; font-size: 12px; "
                 "background: transparent; border: none;"
@@ -453,15 +456,16 @@ class SettingsTab(QWidget):
             self.del_status.setText("Select a month first.")
             return
 
-        label     = item.text().strip()
-        month_id  = item.data(Qt.ItemDataRole.UserRole)
+        label    = item.text().strip()
+        month_id = item.data(Qt.ItemDataRole.UserRole)
 
         reply = QMessageBox.question(
             self,
             "Delete Month",
             f"Permanently delete all data for '{label}'?\n\n"
-            "This will remove all transactions and AI embeddings "
-            "for this month. This cannot be undone.",
+            "This will remove all transactions, AI embeddings "
+            "and search index for this month. "
+            "This cannot be undone.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -470,16 +474,21 @@ class SettingsTab(QWidget):
             return
 
         try:
-            # delete embeddings
+            # delete NumPy embeddings
             delete_month_embeddings(month_id)
 
-            # delete from DB
+            # delete FTS5 index
+            delete_fts_index(month_id)
+
+            # delete from SQLite
             conn = get_connection()
             conn.execute(
-                "DELETE FROM transactions WHERE month_id = ?", (month_id,)
+                "DELETE FROM transactions WHERE month_id = ?",
+                (month_id,)
             )
             conn.execute(
-                "DELETE FROM months WHERE id = ?", (month_id,)
+                "DELETE FROM months WHERE id = ?",
+                (month_id,)
             )
             conn.commit()
             conn.close()

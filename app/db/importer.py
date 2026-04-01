@@ -1,13 +1,16 @@
 import json
 from pathlib import Path
 from datetime import datetime
-from app.db.database import get_connection, month_exists
+from app.db.database import (
+    get_connection, month_exists,
+    index_transactions_fts
+)
 
 
 def parse_month_year(transactions: list) -> tuple[int, int]:
     """Auto-detect month and year from the first transaction's date."""
-    first_date = transactions[0]["date"]   # format: "01-09-2025"
-    parts = first_date.split("-")
+    first_date = transactions[0]["date"]
+    parts      = first_date.split("-")
     day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
     return month, year
 
@@ -45,16 +48,17 @@ def import_json(file_path: str) -> dict:
         label = f"{month_names_short[month]} {year}"
         return {
             "success": False,
-            "message": f"{label} is already imported. Delete it first to re-import."
+            "message": f"{label} is already imported. "
+                       f"Delete it first to re-import."
         }
 
     label = f"{month_names_full[month]} {year}"
 
-    conn = get_connection()
+    conn   = get_connection()
     cursor = conn.cursor()
 
     try:
-        # Insert month record
+        # ── insert month record ───────────────────────────────────
         cursor.execute("""
             INSERT INTO months (month, year, label, file_name, imported_at)
             VALUES (?, ?, ?, ?, ?)
@@ -62,7 +66,7 @@ def import_json(file_path: str) -> dict:
 
         month_id = cursor.lastrowid
 
-        # Bulk insert transactions
+        # ── bulk insert transactions ──────────────────────────────
         rows = []
         for t in transactions:
             rows.append((
@@ -87,21 +91,27 @@ def import_json(file_path: str) -> dict:
 
         conn.commit()
 
-        # ── fetch inserted rows with real DB ids for embedding ────
+        # ── fetch inserted rows with real DB ids ──────────────────
         inserted = conn.execute(
-            "SELECT * FROM transactions WHERE month_id = ?", (month_id,)
+            "SELECT * FROM transactions WHERE month_id = ?",
+            (month_id,)
         ).fetchall()
         inserted_dicts = [dict(r) for r in inserted]
 
         conn.close()
 
-        # ── embed into ChromaDB (after conn is closed) ─────────────
+        # ── embed into NumPy vector store ─────────────────────────
         try:
             from app.ai.embedder import embed_month
             embed_month(month_id, label, inserted_dicts)
         except Exception as embed_err:
-            # embedding failure should not break the import
             print(f"Warning: embedding failed — {embed_err}")
+
+        # ── index into FTS5 for full text search ──────────────────
+        try:
+            index_transactions_fts(month_id, label, inserted_dicts)
+        except Exception as fts_err:
+            print(f"Warning: FTS5 indexing failed — {fts_err}")
 
         total_income  = sum(float(t.get("credit", 0)) for t in transactions)
         total_expense = sum(float(t.get("debit",  0)) for t in transactions)

@@ -1,6 +1,9 @@
 import requests
-from app.ai.embedder import search
-from app.db.database import get_all_months, get_summary, get_category_breakdown
+from app.ai.embedder import hybrid_search
+from app.db.database import (
+    get_all_months, get_summary,
+    get_category_breakdown
+)
 
 LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 
@@ -18,11 +21,14 @@ Rules:
 
 
 def build_context(query: str, month_id: int = None) -> str:
-    """Build full context — category summary + relevant transactions."""
-
+    """
+    Build full context using:
+    1. Exact SQLite category totals (always 100% accurate)
+    2. Hybrid search results (FTS5 + NumPy combined)
+    """
     context_lines = []
 
-    # ── Part 1: full category breakdown (always included) ─────────
+    # ── Part 1: month summary + category breakdown ────────────────
     if month_id:
         months  = get_all_months()
         month   = next((m for m in months if m["id"] == month_id), None)
@@ -31,45 +37,66 @@ def build_context(query: str, month_id: int = None) -> str:
 
         if month:
             context_lines.append(f"=== {month['label']} Summary ===")
-            context_lines.append(f"Total Income:    ₹{summary['total_income']:,.2f}")
-            context_lines.append(f"Total Expense:   ₹{summary['total_expense']:,.2f}")
-            context_lines.append(f"Net Savings:     ₹{summary['net_savings']:,.2f}")
-            context_lines.append(f"Closing Balance: ₹{summary['closing_balance']:,.2f}")
+            context_lines.append(
+                f"Total Income:    ₹{summary['total_income']:,.2f}"
+            )
+            context_lines.append(
+                f"Total Expense:   ₹{summary['total_expense']:,.2f}"
+            )
+            context_lines.append(
+                f"Net Savings:     ₹{summary['net_savings']:,.2f}"
+            )
+            context_lines.append(
+                f"Closing Balance: ₹{summary['closing_balance']:,.2f}"
+            )
             context_lines.append("")
 
         if cats:
-            context_lines.append("=== Spending by Category (EXACT TOTALS) ===")
+            context_lines.append(
+                "=== Spending by Category (EXACT TOTALS) ==="
+            )
             for c in cats:
                 context_lines.append(
                     f"  {c['category']}: ₹{c['total']:,.2f}"
                 )
             context_lines.append("")
 
-    # ── Part 2: relevant transactions from vector search ──────────
-    docs = search(query, month_id=month_id, top_k=25)
+    # ── Part 2: hybrid search results ────────────────────────────
+    raw_docs = hybrid_search(query, month_id=month_id, top_k=25)
+
+    # clean out any None/empty results before sending to LLM
+    docs = [
+        d for d in raw_docs
+        if d and "None" not in d and len(d.strip()) > 10
+    ]
 
     if docs:
         context_lines.append("=== Relevant Transactions ===")
         for i, doc in enumerate(docs, 1):
             context_lines.append(f"{i}. {doc}")
     else:
-        context_lines.append("No relevant transactions found.")
+        context_lines.append(
+            "No relevant transactions found for this query."
+        )
 
     return "\n".join(context_lines)
 
 
 def ask(
-    question: str,
-    month_id: int = None,
-    model: str = "phi-3-mini-4k-instruct",
-    stream: bool = False,
+    question:  str,
+    month_id:  int = None,
+    model:     str = "phi-3-mini-4k-instruct",
+    stream:    bool = False,
     on_token=None,
 ):
     context = build_context(question, month_id)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": f"Context:\n{context}\n\nQuestion: {question}"},
+        {
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {question}"
+        },
     ]
 
     payload = {
@@ -107,7 +134,10 @@ def ask(
         return error
 
     except requests.exceptions.Timeout:
-        error = "⚠️ Request timed out. The model may be loading — try again."
+        error = (
+            "⚠️ Request timed out. "
+            "The model may be loading — try again."
+        )
         if on_token:
             on_token(error)
         return error
