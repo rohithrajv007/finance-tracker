@@ -14,7 +14,7 @@ from app.ui.compare_tab import CompareTab
 from app.ui.chat_tab import ChatTab
 from app.ui.settings_tab import SettingsTab
 import app.settings as settings
-
+from app.ui.lm_studio_guide_tab import LMStudioGuideTab
 BG_BASE      = "#F7F6F2"
 BG_SIDEBAR   = "#2C3E35"
 ACCENT_GREEN = "#4A9B6F"
@@ -245,12 +245,15 @@ class MainWindow(QMainWindow):
         self.compare_tab      = CompareTab()
         self.chat_tab         = ChatTab()
         self.settings_tab     = SettingsTab()
+        self.lm_guide_tab     = LMStudioGuideTab()
+
 
         self.tabs.addTab(self.dashboard_tab,    "  Dashboard  ")
         self.tabs.addTab(self.transactions_tab, "  Transactions  ")
         self.tabs.addTab(self.compare_tab,      "  Compare  ")
         self.tabs.addTab(self.chat_tab,         "  AI Chat  ")
         self.tabs.addTab(self.settings_tab,     "  Settings  ")
+        self.tabs.addTab(self.lm_guide_tab,     "LM Studio Guide") 
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
